@@ -31,3 +31,4 @@ reports/*.json
 .idea/
 .DS_Store
 Thumbs.db
+BugHunter_Agent_SRS.docx
