@@ -19,8 +19,30 @@ from core.models import (
     Patch, PatchStatus, ToolExecution,
 )
 from providers.base import LLMProvider, ProviderError
+from security.secrets_scan import scan_and_redact
 from security.workspace import Workspace
-from tools import code_search, file_reader, patch_tools, repository_scanner, test_runner
+from tools import code_search, dependency_inspector, file_reader, patch_tools, repository_scanner, test_runner
+
+
+def _user_facing_reason(action: str, action_input: dict) -> str:
+    if action == "search":
+        query = str(action_input.get("query", "")).strip()
+        return f"Searching for {query!r} to locate relevant code." if query else "Searching for relevant code."
+    if action == "read_file":
+        path = str(action_input.get("path", "")).strip()
+        return f"Inspecting {path} to compare the implementation with the hypothesis." if path else "Inspecting relevant source code."
+    if action == "generate_patch":
+        return "Preparing a focused patch based on the inspected code and current hypothesis."
+    if action == "finish_no_fix":
+        return "The available evidence is not sufficient to propose a safe patch."
+    return "Selecting the next investigation step."
+
+
+def _redact_tool_output(text: str) -> tuple:
+    redacted, findings = scan_and_redact(text)
+    if findings:
+        redacted += f"\n[Security notice: {len(findings)} secret-like value(s) redacted.]"
+    return redacted, len(findings)
 
 
 class AgentController:
@@ -100,19 +122,51 @@ class AgentController:
                 inp = step.get("action_input") or {}
                 it.hypothesis = step.get("hypothesis") or it.hypothesis
                 it.action = action
-                it.reason = step.get("thought", "")
+                it.reason = _user_facing_reason(action, inp)
                 it.next_action = step.get("next_action_hint", "")
                 yield {"type": "step", "iteration": n, "step": step_no, "action": action,
-                       "thought": it.reason, "hypothesis": it.hypothesis,
-                       "next": it.next_action, "input": inp if action != "generate_patch" else {}}
+                    "reason": it.reason, "hypothesis": it.hypothesis,
+                    "next": it.next_action, "files_inspected": list(it.files_inspected),
+                    "input": inp if action != "generate_patch" else {}}
 
                 if action == "search":
                     query = str(inp.get("query", "")).strip()
                     hits = code_search.search(self.ws, query) if query else []
                     text = "\n".join(f"{h['file']}:{h['line']}: {h['text']}" for h in hits) or "(no matches)"
+                    text, secret_findings = _redact_tool_output(text)
                     it.tool_executions.append(ToolExecution(tool_name="code_search", input=query, output=text))
                     history.append({"tool": "code_search", "result_text": f"search '{query}':\n{text}"})
-                    yield {"type": "tool", "tool": "Code Search", "input": query, "output": text}
+                    yield {"type": "tool", "tool": "Code Search", "input": query,
+                           "output": text, "secret_findings": secret_findings}
+
+                elif action == "find_symbol":
+                    symbol = str(inp.get("symbol", "")).strip()
+                    hits = code_search.find_symbol(self.ws, symbol) if symbol else []
+                    text = "\n".join(
+                        f"{hit['file']}:{hit['line']} [{hit['kind']}]: {hit['text']}" for hit in hits
+                    ) or "(no matches)"
+                    text, secret_findings = _redact_tool_output(text)
+                    it.tool_executions.append(ToolExecution(
+                        tool_name="symbol_search", input=symbol, output=text))
+                    history.append({"tool": "symbol_search", "result_text": f"symbol '{symbol}':\n{text}"})
+                    yield {"type": "tool", "tool": "Symbol Search", "input": symbol,
+                           "output": text, "secret_findings": secret_findings}
+
+                elif action == "inspect_dependencies":
+                    result = dependency_inspector.inspect_dependencies(self.ws)
+                    text = "\n".join(
+                        f"{item['name']} {item['constraint']} ({item['group']})".strip()
+                        for item in result["dependencies"]
+                    ) or "(no dependencies declared)"
+                    if result["note"]:
+                        text += "\n" + result["note"]
+                    text, secret_findings = _redact_tool_output(text)
+                    it.tool_executions.append(ToolExecution(
+                        tool_name="dependency_inspector", input=", ".join(result["manifests"]), output=text))
+                    history.append({"tool": "dependency_inspector", "result_text": text})
+                    yield {"type": "tool", "tool": "Dependency Inspector",
+                           "input": ", ".join(result["manifests"]) or "dependency manifests",
+                           "output": text, "secret_findings": secret_findings}
 
                 elif action == "read_file":
                     path = str(inp.get("path", "")).strip()
@@ -122,11 +176,12 @@ class AgentController:
                         text = f"FILE {path}:\n{res['content']}"
                     else:
                         text = f"ERROR: {res['error']}"
+                    text, secret_findings = _redact_tool_output(text)
                     it.tool_executions.append(ToolExecution(tool_name="file_reader", input=path,
                                                             output=text[:2000], ok=res["ok"]))
                     history.append({"tool": "file_reader", "result_text": text})
                     yield {"type": "tool", "tool": "File Reader", "input": path,
-                           "output": text[:1500], "ok": res["ok"]}
+                           "output": text[:1500], "ok": res["ok"], "secret_findings": secret_findings}
 
                 elif action == "generate_patch":
                     self._set(S.PATCH_PROPOSED)
@@ -163,13 +218,22 @@ class AgentController:
             self._set(S.TESTING)
             yield {"type": "testing", "iteration": n}
             result = test_runner.run_tests(self.ws, timeout=inv.timeout_seconds)
+            result.output, secret_findings = _redact_tool_output(result.output)
             it.test_result = result
-            yield {"type": "test", "iteration": n, "result": result}
+            yield {"type": "test", "iteration": n, "result": result,
+                    "secret_findings": secret_findings}
 
             if result.passed:
                 self._set(S.TEST_PASSED)
                 yield from self._finish("COMPLETED",
                                         f"Tests passed after {n} iteration(s). Review the patch and approve it to accept.")
+                return
+
+            if result.status == "NO_TESTS":
+                self._set(S.HUMAN_INTERVENTION)
+                summary = "No tests were found. The proposed patch remains applied but is unverified; review it before approval."
+                yield {"type": "notice", "message": summary}
+                yield from self._finish("HUMAN_INTERVENTION", summary)
                 return
 
             self._set(S.TEST_FAILED)

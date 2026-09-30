@@ -14,8 +14,8 @@ that it has no scripted fix, rather than fabricating one.
 from __future__ import annotations
 
 import json
+import difflib
 import os
-import subprocess
 
 from providers.base import LLMProvider
 
@@ -168,27 +168,20 @@ class MockProvider(LLMProvider):
     def _detect_target_file(self):
         if not self.workspace:
             return None
-        tree = set(self.workspace.file_tree())
+        tree = {path.replace("\\", "/") for path in self.workspace.file_tree()}
         for candidate in PLAYBOOKS:
             if candidate in tree:
                 return candidate
         return None
 
     def _compute_diff(self, relative_path: str, new_content: str) -> str:
-        """Computes a real, git-apply-compatible unified diff by temporarily
-        writing the known-good fix and asking git to diff it, then reverting —
-        this guarantees valid diff formatting without hand-maintaining one."""
+        """Build a unified diff without modifying the workspace file."""
         full = os.path.join(self.workspace.root, relative_path)
-        with open(full, "r", encoding="utf-8") as f:
+        with open(full, "r", encoding="utf-8", newline="") as f:
             original = f.read()
-        try:
-            with open(full, "w", encoding="utf-8") as f:
-                f.write(new_content)
-            result = subprocess.run(
-                ["git", "diff", "--no-color", "--", relative_path],
-                cwd=self.workspace.root, capture_output=True, text=True, timeout=10,
-            )
-            return result.stdout
-        finally:
-            with open(full, "w", encoding="utf-8") as f:
-                f.write(original)
+        return "".join(difflib.unified_diff(
+            original.splitlines(keepends=True),
+            new_content.splitlines(keepends=True),
+            fromfile=f"a/{relative_path}",
+            tofile=f"b/{relative_path}",
+        ))

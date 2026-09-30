@@ -44,6 +44,29 @@ def _restricted_env() -> dict:
     return env
 
 
+def _resource_limit_preexec(timeout: int):
+    if os.name != "posix":
+        return None
+
+    def apply_limits():
+        import resource
+
+        if hasattr(resource, "RLIMIT_CPU"):
+            _, hard_limit = resource.getrlimit(resource.RLIMIT_CPU)
+            cpu_limit = max(1, int(timeout))
+            if hard_limit != resource.RLIM_INFINITY:
+                cpu_limit = min(cpu_limit, hard_limit)
+            resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit, hard_limit))
+        if hasattr(resource, "RLIMIT_AS"):
+            _, hard_limit = resource.getrlimit(resource.RLIMIT_AS)
+            memory_limit = 2 * 1024 * 1024 * 1024
+            if hard_limit != resource.RLIM_INFINITY:
+                memory_limit = min(memory_limit, hard_limit)
+            resource.setrlimit(resource.RLIMIT_AS, (memory_limit, hard_limit))
+
+    return apply_limits
+
+
 def run_allowlisted(cmd: list, cwd: str, timeout: int) -> CommandResult:
     """Execute a command inside the workspace if (and only if) it is allowlisted."""
     if not cmd:
@@ -58,6 +81,7 @@ def run_allowlisted(cmd: list, cwd: str, timeout: int) -> CommandResult:
         proc = subprocess.run(
             cmd, cwd=cwd, capture_output=True, text=True,
             timeout=timeout, env=_restricted_env(),
+            preexec_fn=_resource_limit_preexec(timeout),
         )
         duration_ms = int((time.time() - start) * 1000)
         return CommandResult(proc.returncode == 0, proc.returncode, proc.stdout, proc.stderr, duration_ms)

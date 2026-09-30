@@ -45,7 +45,7 @@ def validate_and_apply(workspace: Workspace, diff_text: str, summary: str = "") 
     patch.checkpoint_ref = checkpoint
 
     patch_file = os.path.join(workspace.root, "_agent_patch.diff")
-    with open(patch_file, "w", encoding="utf-8") as f:
+    with open(patch_file, "w", encoding="utf-8", newline="") as f:
         f.write(diff_text)
 
     try:

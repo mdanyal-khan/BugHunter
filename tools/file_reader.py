@@ -34,17 +34,3 @@ def read_file(workspace: Workspace, relative_path: str, start_line: int = None, 
         content = "".join(lines)
 
     return {"ok": True, "path": relative_path, "content": content, "total_lines": len(lines)}
-
-
-def inspect_dependencies(workspace: Workspace) -> dict:
-    manifests = ["requirements.txt", "pyproject.toml", "setup.py", "Pipfile"]
-    for m in manifests:
-        full = workspace.resolve(m)
-        if os.path.isfile(full):
-            with open(full, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-            deps = []
-            if m == "requirements.txt":
-                deps = [ln.strip() for ln in content.splitlines() if ln.strip() and not ln.startswith("#")]
-            return {"manifest": m, "raw": content[:4000], "dependencies": deps}
-    return {"manifest": None, "raw": "", "dependencies": []}

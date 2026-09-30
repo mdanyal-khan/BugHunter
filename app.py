@@ -69,6 +69,27 @@ def load_zip(uploaded):
     st.session_state.notice = ("ok", f"Extracted {uploaded.name} ({res.file_count} files).")
 
 
+def load_github(repo_url: str, token: str, username: str):
+    ws = _new_workspace()
+    res = ws.clone_github(repo_url, token, username)
+    if not res.ok:
+        ws.destroy()
+        st.session_state.ws = None
+        st.session_state.notice = ("bad", res.message)
+        return
+    st.session_state.repo_label = repo_url.strip().rstrip("/")
+    st.session_state.scan = repository_scanner.scan(ws)
+    st.session_state.notice = ("ok", f"Cloned {st.session_state.repo_label} ({res.file_count} files).")
+
+
+def load_github_from_form():
+    try:
+        load_github(st.session_state.github_url, st.session_state.github_token,
+                    st.session_state.github_username)
+    finally:
+        st.session_state.github_token = ""
+
+
 def zip_workspace(ws: Workspace) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
@@ -100,7 +121,7 @@ def approve(patch):
     patch.status = PatchStatus.APPROVED
     last = inv.iterations[-1].test_result if inv.iterations else None
     verified = bool(last and last.passed)
-    note = "" if verified else " ⚠️ This fix is UNVERIFIED — tests did not pass."
+    note = "" if verified else " ⚠️ This fix is UNVERIFIED — tests did not pass or were unavailable."
     inv.final_report = FinalReport(
         outcome=inv.final_report.outcome if inv.final_report else "COMPLETED",
         iterations_used=len(inv.iterations), accepted_patch=patch,
@@ -110,19 +131,25 @@ def approve(patch):
 
 def reject(patch):
     inv, ws = st.session_state.inv, st.session_state.ws
-    patch_tools.rollback_patch(ws, patch)
+    if not patch_tools.rollback_patch(ws, patch):
+        st.session_state.notice = ("bad", "Could not restore the workspace checkpoint; the patch remains applied.")
+        return
     patch.status = PatchStatus.REJECTED
     if inv.final_report:
         inv.final_report.accepted_patch = None
         inv.final_report.summary = "Patch rejected by the developer and reverted."
+    save_report(inv)
 
 
 def revert(patch):
-    patch_tools.rollback_patch(st.session_state.ws, patch)
+    if not patch_tools.rollback_patch(st.session_state.ws, patch):
+        st.session_state.notice = ("bad", "Could not restore the workspace checkpoint; no files were reverted.")
+        return
     inv = st.session_state.inv
     if inv.final_report:
         inv.final_report.accepted_patch = None
         inv.final_report.summary = "Patch reverted by the developer."
+    save_report(inv)
 
 
 # ---------------------------------------------------------------- sidebar
@@ -179,12 +206,21 @@ def build_providers(cfg):
 # ---------------------------------------------------------------- sections
 def repository_section():
     C.step_title(1, "Load a repository")
-    tab_zip, tab_demo = st.tabs(["📦 Upload ZIP", "🎯 Demo repositories"])
+    tab_zip, tab_github, tab_demo = st.tabs(["📦 Upload ZIP", "🐙 GitHub URL", "🎯 Demo repositories"])
     with tab_zip:
         up = st.file_uploader("Python repository (.zip)", type=["zip"], label_visibility="collapsed")
         if up is not None and st.session_state.repo_label != up.name:
             load_zip(up)
             st.rerun()
+    with tab_github:
+        with st.form("github_repo_form"):
+            st.text_input("GitHub repository URL", placeholder="https://github.com/owner/repo",
+                          key="github_url")
+            st.text_input("GitHub username (private repos)", key="github_username")
+            st.text_input("Personal access token (private repos)", type="password",
+                          help="Use a token with read access to repository contents. GitHub App tokens can use x-access-token as the username.",
+                          key="github_token")
+            st.form_submit_button("Clone repository", on_click=load_github_from_form)
     with tab_demo:
         cols = st.columns(3)
         for col, (key, d) in zip(cols, DEMOS.items()):
@@ -203,9 +239,11 @@ def repository_section():
     if scan:
         C.metrics([("Repository", f'<span style="font-size:1rem">{st.session_state.repo_label}</span>'),
                    ("Files", scan["file_count"]), ("Python files", scan["python_file_count"]),
+                   ("Directories", len(scan["directories"])),
                    ("Test files", len(scan["test_files"]))])
         with st.expander("Repository structure"):
-            st.code("\n".join(scan["files"]), language="text")
+            entries = [f"{directory}/" for directory in scan["directories"]] + scan["files"]
+            st.code("\n".join(entries), language="text")
 
 
 def bug_section(cfg):
@@ -259,7 +297,7 @@ def results_section():
 
     tests = [i.test_result for i in inv.iterations if i.test_result]
     last = tests[-1] if tests else None
-    pill = "ok" if (last and last.passed) else "bad"
+    pill = "ok" if (last and last.passed) else ("warn" if last and last.status == "NO_TESTS" else "bad")
     C.metrics([
         ("Status", C.status_pill(inv.status.value.replace("_", " "), pill if last else "warn")),
         ("Iterations", f"{len(inv.iterations)} / {inv.max_iterations}"),

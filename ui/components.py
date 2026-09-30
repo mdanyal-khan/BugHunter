@@ -12,6 +12,8 @@ PHASE_ICONS = ["👁️", "🧠", "🛠️", "🧪", "🔁"]
 
 ACTION_LABELS = {
     "search": "Searching the codebase",
+    "find_symbol": "Finding symbol definitions and references",
+    "inspect_dependencies": "Inspecting declared dependencies",
     "read_file": "Reading a source file",
     "generate_patch": "Generating a patch",
     "finish_no_fix": "Stopping — no confident fix",
@@ -107,16 +109,20 @@ def render_event(ev: dict):
         target = ""
         if ev.get("input"):
             target = " · " + ", ".join(f"<code>{escape(str(v))}</code>" for v in ev["input"].values())
+        inspected = ", ".join(ev.get("files_inspected", [])) or "—"
         st.markdown(
             f'<div class="card step"><div class="lbl" style="margin-top:0">Current action</div>'
             f'<div class="val"><b>{escape(label)}</b>{target}</div>'
-            f'<div class="lbl">Reason</div><div class="val">{escape(ev["thought"] or "—")}</div>'
+            f'<div class="lbl">Reason</div><div class="val">{escape(ev["reason"] or "—")}</div>'
+            f'<div class="lbl">Files inspected</div><div class="val">{escape(inspected)}</div>'
             f'<div class="lbl">Current hypothesis</div><div class="val">{escape(ev["hypothesis"] or "—")}</div>'
             f'<div class="lbl">Next action</div><div class="val">{escape(ev["next"] or "—")}</div></div>',
             unsafe_allow_html=True)
     elif t == "tool":
         icon = "✅" if ev.get("ok", True) else "⚠️"
         with st.expander(f'{icon} {ev["tool"]} — {ev["input"]}'):
+            if ev.get("secret_findings"):
+                st.warning(f"Redacted {ev['secret_findings']} secret-like value(s) from this output.")
             st.code(ev["output"], language="text")
     elif t == "patch":
         p = ev["patch"]
@@ -128,6 +134,8 @@ def render_event(ev: dict):
     elif t == "testing":
         st.info("🧪 Running tests in the isolated workspace…")
     elif t == "test":
+        if ev.get("secret_findings"):
+            st.warning(f"Redacted {ev['secret_findings']} secret-like value(s) from test output.")
         render_test_result(ev["result"], ev["iteration"])
     elif t == "notice":
         st.warning(ev["message"], icon="🔁")

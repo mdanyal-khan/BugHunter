@@ -5,7 +5,7 @@ import os
 import re
 import sys
 
-from core.models import TestResult
+from core.models import TestResult as RunResult
 from security.command_policy import run_allowlisted
 from security.workspace import Workspace
 
@@ -31,7 +31,7 @@ def run_tests(workspace: Workspace, target: str = None, timeout: int = 60) -> Te
     test_targets = [target] if target else discover_tests(workspace)
 
     if not test_targets:
-        return TestResult(command="(none)", passed=False, status="NO_TESTS",
+        return RunResult(command="(none)", passed=False, status="NO_TESTS",
                            output="No test files were found in this repository.")
 
     # Attempt 1: pytest (the expected/standard path per SYS-006).
@@ -48,15 +48,22 @@ def run_tests(workspace: Workspace, target: str = None, timeout: int = 60) -> Te
 def _from_pytest(cmd, result, test_targets) -> TestResult:
     output = (result.stdout or "") + "\n" + (result.stderr or "")
     if result.timed_out:
-        return TestResult(command=" ".join(cmd), passed=False, status="TIMEOUT",
+        return RunResult(command=" ".join(cmd), passed=False, status="TIMEOUT",
                            duration_ms=result.duration_ms, output=output)
     passed_m = SUMMARY_RE.search(output)
     failed_m = FAILED_RE.search(output)
     error_m = ERROR_RE.search(output)
     passed_count = int(passed_m.group(1)) if passed_m else 0
     failed_count = (int(failed_m.group(1)) if failed_m else 0) + (int(error_m.group(1)) if error_m else 0)
-    status = "PASS" if result.ok and failed_count == 0 else "FAIL"
-    return TestResult(
+    if result.ok and failed_count == 0:
+        status = "PASS"
+    elif error_m and not failed_m:
+        status = "ERROR"
+    elif not result.ok and not passed_m and not failed_m and not error_m:
+        status = "ERROR"
+    else:
+        status = "FAIL"
+    return RunResult(
         command=" ".join(cmd), passed=(status == "PASS"), status=status,
         duration_ms=result.duration_ms, output=output[-6000:],
         passed_count=passed_count, failed_count=failed_count,
@@ -83,9 +90,9 @@ def _run_fallback(workspace: Workspace, test_targets, timeout) -> TestResult:
             total_failed += 1
     output = "\n\n".join(combined_output)[-6000:]
     if any_timeout:
-        return TestResult(command="python <test files>", passed=False, status="TIMEOUT", output=output)
+        return RunResult(command="python <test files>", passed=False, status="TIMEOUT", output=output)
     status = "PASS" if total_failed == 0 and total_passed > 0 else "FAIL"
-    return TestResult(
+    return RunResult(
         command="python <test files> (pytest unavailable — used fallback runner)",
         passed=(status == "PASS"), status=status, output=output,
         passed_count=total_passed, failed_count=total_failed,

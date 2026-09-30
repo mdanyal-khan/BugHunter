@@ -131,9 +131,22 @@ class FinalReport:
                 lines.append(f"- **Files inspected:** {', '.join(it.files_inspected)}")
             if it.patch:
                 lines.append(f"- **Patch status:** {it.patch.status.value}")
+                lines.append(f"- **Patch summary:** {it.patch.summary or 'No summary provided.'}")
+                if it.patch.files_changed:
+                    lines.append(f"- **Files changed:** {', '.join(it.patch.files_changed)}")
+                if it.patch.diff:
+                    lines += ["", "  Attempted diff:", "", "  ```diff"]
+                    lines.extend(f"  {line}" for line in it.patch.diff.splitlines())
+                    lines.append("  ```")
             if it.test_result:
                 lines.append(f"- **Test result:** {it.test_result.status} "
                               f"({it.test_result.passed_count} passed / {it.test_result.failed_count} failed)")
+                lines.append(f"- **Test command:** `{it.test_result.command}`")
+                lines.append(f"- **Duration:** {it.test_result.duration_ms} ms")
+                if it.test_result.output:
+                    lines += ["", "  Output:", "", "  ```text"]
+                    lines.extend(f"  {line}" for line in it.test_result.output.splitlines())
+                    lines.append("  ```")
             lines.append("")
         if self.accepted_patch:
             lines += ["## Accepted Patch", "```diff", self.accepted_patch.diff, "```"]

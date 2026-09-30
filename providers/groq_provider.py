@@ -5,12 +5,57 @@ so the app has no hard dependency on the `groq` SDK.
 """
 from __future__ import annotations
 
+import re
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from typing import Optional
 
 import requests
 
 from core.config import Config
 from providers.base import LLMProvider, ProviderError, ChatMessage
+
+MAX_ATTEMPTS = 4
+_DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)(ms|s|m|h)")
+
+
+def _parse_wait_seconds(value: str) -> Optional[float]:
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+
+    try:
+        retry_at = parsedate_to_datetime(value)
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        pass
+
+    parts = _DURATION_PART.findall(value.lower())
+    if not parts or "".join(amount + unit for amount, unit in parts) != value.lower():
+        return None
+    factors = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}
+    return sum(float(amount) * factors[unit] for amount, unit in parts)
+
+
+def _rate_limit_wait(response, attempt: int) -> float:
+    headers = response.headers
+    waits = [
+        _parse_wait_seconds(headers.get(name, ""))
+        for name in (
+            "Retry-After",
+            "x-ratelimit-reset-requests",
+            "x-ratelimit-reset-tokens",
+        )
+    ]
+    provider_waits = [wait for wait in waits if wait is not None]
+    return max(provider_waits) if provider_waits else min(30.0, 2.0 ** (attempt + 1))
 
 
 class GroqProvider(LLMProvider):
@@ -38,7 +83,8 @@ class GroqProvider(LLMProvider):
             payload["response_format"] = {"type": "json_object"}
 
         last_err = None
-        for attempt in range(3):  # AI-005: bounded retries with backoff
+        json_fallback_used = False
+        for attempt in range(MAX_ATTEMPTS):
             try:
                 resp = requests.post(
                     f"{self.base_url}/chat/completions",
@@ -56,8 +102,15 @@ class GroqProvider(LLMProvider):
                 continue
 
             if resp.status_code == 429:
-                last_err = ProviderError("Groq rate limit reached.", kind="rate_limit")
-                time.sleep(2.0 * (attempt + 1))
+                if attempt == MAX_ATTEMPTS - 1:
+                    raise ProviderError(
+                        f"Groq rate limit persisted after {MAX_ATTEMPTS} attempts.", kind="rate_limit"
+                    )
+                wait_seconds = _rate_limit_wait(resp, attempt)
+                last_err = ProviderError(
+                    f"Groq rate limit reached; retrying in {wait_seconds:g}s.", kind="rate_limit"
+                )
+                time.sleep(wait_seconds)
                 continue
             if resp.status_code == 401:
                 raise ProviderError("Groq rejected the API key (401 Unauthorized).", kind="auth")
@@ -65,6 +118,15 @@ class GroqProvider(LLMProvider):
                 last_err = ProviderError(f"Groq server error ({resp.status_code}).", kind="server")
                 time.sleep(1.5 * (attempt + 1))
                 continue
+            if resp.status_code == 400 and json_mode and not json_fallback_used:
+                try:
+                    error_code = resp.json().get("error", {}).get("code")
+                except (AttributeError, ValueError):
+                    error_code = None
+                if error_code == "json_validate_failed":
+                    payload.pop("response_format", None)
+                    json_fallback_used = True
+                    continue
             if resp.status_code != 200:
                 raise ProviderError(f"Groq returned HTTP {resp.status_code}: {resp.text[:300]}", kind="error")
 

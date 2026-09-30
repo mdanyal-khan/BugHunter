@@ -9,6 +9,7 @@ modified (FR-011).
 """
 from __future__ import annotations
 
+import base64
 import os
 import shutil
 import subprocess
@@ -18,6 +19,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 from core.config import Config
 
@@ -93,6 +95,65 @@ class Workspace:
         file_count, total_size = self._stats()
         self._git_init()
         return ExtractionResult(True, "Repository extracted successfully.", file_count, total_size)
+
+    def clone_github(self, repo_url: str, token: str = "", username: str = "") -> ExtractionResult:
+        """Clone a GitHub HTTPS repository into this isolated workspace."""
+        normalized_url = _normalize_github_url(repo_url)
+        if not normalized_url:
+            return ExtractionResult(
+                False, "Use an HTTPS GitHub repository URL, such as https://github.com/owner/repo."
+            )
+
+        env = {
+            key: os.environ[key]
+            for key in ("PATH", "HOME", "LANG", "LC_ALL", "SYSTEMROOT", "TEMP", "TMP")
+            if key in os.environ
+        }
+        env.update({
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+        })
+        if token:
+            credentials = base64.b64encode(f"{username or 'x-access-token'}:{token}".encode()).decode("ascii")
+            env.update({
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "http.extraHeader",
+                "GIT_CONFIG_VALUE_0": f"Authorization: Basic {credentials}",
+            })
+
+        try:
+            result = subprocess.run(
+                ["git", "clone", "--depth", "1", "--", normalized_url, "."], cwd=self.root,
+                capture_output=True, text=True, timeout=120, env=env,
+            )
+        except (subprocess.SubprocessError, FileNotFoundError):
+            self._clear_contents()
+            return ExtractionResult(False, "GitHub clone failed. Check the URL, access token, and network connection.")
+
+        if result.returncode != 0:
+            self._clear_contents()
+            return ExtractionResult(False, "GitHub clone failed. Check the URL, access token, and network connection.")
+
+        file_count, total_size = self._stats()
+        if total_size > Config.MAX_UPLOAD_MB * 4 * 1024 * 1024:
+            self._clear_contents()
+            return ExtractionResult(False, "Repository expands beyond the allowed workspace size limit.")
+        self._git_init()
+        return ExtractionResult(True, "GitHub repository cloned successfully.", file_count, total_size)
+
+    def _clear_contents(self) -> None:
+        for name in os.listdir(self.root):
+            path = os.path.join(self.root, name)
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        self._git_ready = False
+        self.baseline = None
 
     def load_local_dir(self, source_dir: str) -> ExtractionResult:
         """Used for bundled demo repositories (Section 30)."""
@@ -198,3 +259,24 @@ class Workspace:
                 if len(tree) >= max_entries:
                     return tree
         return tree
+
+
+def _normalize_github_url(repo_url: str) -> Optional[str]:
+    try:
+        parsed = urlsplit(repo_url.strip())
+        if (parsed.scheme != "https" or parsed.hostname.lower() != "github.com" or parsed.port is not None
+                or parsed.username or parsed.password or parsed.query or parsed.fragment):
+            return None
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) != 2:
+            return None
+        owner, repository = parts
+        if repository.endswith(".git"):
+            repository = repository[:-4]
+        allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
+        if any(not part or part in (".", "..") or any(char not in allowed for char in part)
+               for part in (owner, repository)):
+            return None
+        return f"https://github.com/{owner}/{repository}.git"
+    except (AttributeError, ValueError):
+        return None
