@@ -1,47 +1,135 @@
 # 🐞 BugHunter Agent
+**Find the defect. Follow the evidence. Review the fix.**
 
-Agentic AI debugging assistant (48-hour hackathon MVP). Upload a Python repo (ZIP) or clone a GitHub repository, describe a bug, and the
-agent runs an **Observe → Reason → Act → Test → Observe Again** loop: it searches and reads code, forms a
-hypothesis, proposes a patch, applies it in an **isolated workspace**, runs the tests, and iterates on
-failure. You review the diff and **approve / reject / revert**.
+BugHunter is an AI-assisted debugging workbench for real repositories. Describe a bug, then watch the agent inspect code, form a hypothesis, propose a patch, and run the project’s tests inside an isolated workspace. You stay in control: review the diff, then approve, reject, or revert it.
 
-## Quick start
-```bash
-python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
+![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![Streamlit](https://img.shields.io/badge/UI-Streamlit-FF4B4B?logo=streamlit&logoColor=white)
+![Test runners](https://img.shields.io/badge/Test%20runners-Python%20%7C%20Dart%20%7C%20JS%20%7C%20Go%20%7C%20Rust-087F70)
+
+> **The loop:** Observe → Reason → Act → Test → Observe Again
+
+## What You Can Do
+
+| Capability | How it works |
+|---|---|
+| Bring a repository | Upload a ZIP or clone a GitHub repository into a per-session workspace. |
+| Investigate a bug | Provide a description and optional stack trace; the agent searches, reads, and inspects dependencies. |
+| Validate a proposed fix | Run supported project test suites and feed failures back into the next iteration. |
+| Stay in control | Inspect the diff and approve, reject, or revert the patch before accepting it. |
+| Keep working through provider limits | Automatically fail over between Groq and Hugging Face when both credentials are configured. |
+| Try it without an API key | Use Offline Demo with the three bundled bug repositories. |
+
+## Quick Start
+
+**Requirements:** Python 3.10+, Git, and the SDKs/dependencies for the language projects you want to test.
+
+Create and activate a virtual environment, then install the app dependencies.
+
+**Windows PowerShell**
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-cp .env.example .env        # add GROQ_API_KEY (primary) and/or HF_API_KEY
+Copy-Item .env.example .env
+```
+
+**macOS / Linux**
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+Add at least one provider key to `.env`, then start the app:
+
+```bash
 streamlit run app.py
 ```
-No key yet? Choose **Offline Demo** in the sidebar and load one of the 3 bundled demo repositories — the
-full loop runs with no internet (Demo 2 deliberately fails once, then recovers, to show the feedback loop).
 
-## Load a GitHub repository
-Choose **GitHub URL**, enter a repository URL such as `https://github.com/owner/repo`, and select **Clone repository**.
-Public repositories do not need credentials. For private repositories, provide a GitHub personal access token
-with read access to repository contents and the associated GitHub username. GitHub App tokens can use
-`x-access-token` as the username. Credentials are used only for the clone and are not saved to disk.
+No API key yet? Skip provider setup, choose **Offline Demo** in the sidebar, and load a bundled repository. Demo 2 intentionally fails on its first test run, then demonstrates the repair loop.
 
-## Architecture (see SRS §22)
-| Layer | Code |
+## Investigation Flow
+
+1. **Load** a ZIP, a GitHub repository, or an offline demo.
+2. **Describe** the bug and paste an optional stack trace.
+3. **Watch** the agent inspect the repository and work through its debugging loop.
+4. **Review** the patch and test results.
+5. **Approve, reject, or revert** the change; download the patched project or report when appropriate.
+
+For a public GitHub repository, provide its HTTPS URL. Private repositories require a personal access token with repository read access and the associated username. GitHub App tokens can use `x-access-token` as the username. Clone credentials are used for that operation and are not written to the repository.
+
+## Languages & Test Runners
+
+The scanner recognizes these source languages and common test-file conventions:
+
+| Ecosystem | Discovery | Test command |
+|---|---|---|
+| Python | `test_*.py`, `*_test.py` | `pytest`; a bundled self-runner fallback is used if pytest is unavailable. |
+| Flutter / Dart | `*_test.dart` | `flutter test` for Flutter projects; otherwise `dart test`. |
+| JavaScript / TypeScript | `*.test.*`, `*.spec.*` | `npm test` when a test script exists; otherwise `node --test`. TypeScript projects should configure their own test script/loader. |
+| Go | `*_test.go` | `go test -v ./...` |
+| Rust | Rust test sources in a Cargo project | `cargo test` |
+
+In mixed-language repositories, detected suites run sequentially. Install each project’s SDK and dependencies before investigating; BugHunter does not install project dependencies or provide language-specific static analysis. If a required test tool is missing, the run reports which tool is unavailable.
+
+## AI Provider Failover
+
+Automatic failover is enabled by default. Add both `GROQ_API_KEY` and `HF_API_KEY` to `.env`, or enter the primary and fallback keys in the sidebar. On a rate limit, BugHunter tries the other provider for that request and checks the configured primary again on the next request. If both providers fail, the live investigation reports both errors and suggests checking the keys/quotas or retrying later.
+
+The default Hugging Face model is `openai/gpt-oss-120b:fastest`. If Hugging Face reports that a selected model is unsupported, BugHunter retries with this configured fallback model. Your Hugging Face account must have an Inference Provider enabled that serves the model.
+
+## Configuration
+
+Environment variables are loaded from `.env` when present. Sidebar values override provider/model and investigation settings for the current session only.
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `GROQ_API_KEY` | Groq credential | unset |
+| `GROQ_MODEL` | Groq chat model | `llama-3.3-70b-versatile` |
+| `GROQ_API_BASE` | Groq-compatible API base URL | `https://api.groq.com/openai/v1` |
+| `HF_API_KEY` | Hugging Face Inference Providers token | unset |
+| `HF_MODEL` | Hugging Face chat model | `openai/gpt-oss-120b:fastest` |
+| `DEFAULT_PROVIDER` | Initial provider selection | `groq` |
+| `BUGHUNTER_MAX_ITERATIONS` | Maximum investigation iterations | `5` |
+| `BUGHUNTER_MAX_STEPS` | Agent steps per iteration | `4` |
+| `BUGHUNTER_TIMEOUT_SECONDS` | Test-suite timeout, in seconds | `60` |
+| `BUGHUNTER_LLM_TIMEOUT` | Provider request timeout, in seconds | `30` |
+| `BUGHUNTER_MAX_UPLOAD_MB` | Maximum ZIP upload size | `25` |
+| `BUGHUNTER_WORKSPACE_ROOT` | Root directory for isolated sessions | `/tmp/bughunter_workspaces` |
+| `BUGHUNTER_REPORTS_DIR` | Directory for saved reports | `./reports` |
+
+## Architecture
+
+| Layer | Responsibility |
 |---|---|
-| Presentation | `app.py`, `ui/` |
-| Agent | `agent/controller.py` (loop), `agent/prompts.py` (Prompt Manager + JSON step contract) |
-| AI Provider | `providers/` — `LLMProvider` interface, `GroqProvider`, `HuggingFaceProvider`, `MockProvider` (offline demo) |
-| Tools | `tools/` — scanner, code/symbol search, file reader, test discovery/runner, patch apply/diff/rollback |
-| Security | `security/` — workspace isolation + path-traversal guard, command allowlist + timeouts, secret redaction, untrusted-data wrapping |
-
-## Security notes (honest scope)
-Repository content is treated as untrusted. The LLM only *proposes* actions; the app executes them under an
-allowlist (`python`, `pytest`, `git`), timeouts, a scrubbed environment, and workspace path checks. This is
-**not** container-grade sandboxing — run untrusted repos in a VM/container for anything beyond a demo.
-POSIX hosts additionally apply CPU and address-space limits to workspace commands; Windows enforces command
-timeouts and the allowlist but does not currently apply equivalent process memory quotas.
+| `app.py`, `ui/` | Streamlit interface, session state, live events, and review controls. |
+| `agent/controller.py` | Observe–reason–act–test loop and provider failover. |
+| `agent/prompts.py` | Structured model instructions and untrusted repository context. |
+| `providers/` | Common provider interface, Groq, Hugging Face, and offline mock provider. |
+| `tools/` | Repository scan, search, file/dependency inspection, test discovery, and patch operations. |
+| `security/` | Workspace/path checks, command allowlisting, environment scrubbing, and secret redaction. |
 
 ## Verify
-`python selftest.py` runs the whole pipeline offline on all three demo bugs plus security checks.
-Demo 3's README contains an intentional prompt-injection trap (SRS TC-010).
 
-## Config
-Env vars: `GROQ_API_KEY`, `GROQ_MODEL`, `HF_API_KEY`, `HF_MODEL`, `DEFAULT_PROVIDER`
-(also `BUGHUNTER_MAX_ITERATIONS`, `BUGHUNTER_TIMEOUT_SECONDS`, `BUGHUNTER_WORKSPACE_ROOT`).
-Flutter/Dart support is a documented future extension, not part of the MVP.
+Run the test suite:
+
+```bash
+python -m pytest -q
+```
+
+Run the end-to-end offline demos and built-in security checks:
+
+```bash
+python selftest.py
+```
+
+Demo 3 includes an intentional prompt-injection string in its README to exercise untrusted-repository handling.
+
+## Security & Limitations
+
+- Repository files are untrusted input. The model proposes actions; the application validates and executes them.
+- Test commands run project code in a per-session workspace with an executable allowlist, scrubbed environment, path checks, and timeouts.
+- **This is not a container-grade sandbox.** For untrusted repositories, use a VM or container. Windows does not currently enforce the POSIX CPU/address-space limits, and process timeouts may not constrain every child process.
+- Review patches before accepting them. Dependencies are not installed automatically, and a passing test suite is not proof that a patch is correct.

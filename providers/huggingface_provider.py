@@ -12,6 +12,8 @@ import requests
 from core.config import Config
 from providers.base import LLMProvider, ProviderError
 
+FALLBACK_MODEL = "openai/gpt-oss-120b:fastest"
+
 
 class HuggingFaceProvider(LLMProvider):
     name = "huggingface"
@@ -58,11 +60,27 @@ class HuggingFaceProvider(LLMProvider):
                 continue
 
             if resp.status_code == 429:
-                last_err = ProviderError("Hugging Face rate limit reached.", kind="rate_limit")
-                time.sleep(2.0 * (attempt + 1))
-                continue
+                raise ProviderError(
+                    "Hugging Face rate limit or quota reached; switching providers if configured.",
+                    kind="rate_limit",
+                )
             if resp.status_code == 401:
                 raise ProviderError("Hugging Face rejected the API token (401).", kind="auth")
+            if resp.status_code == 400:
+                try:
+                    error = resp.json().get("error", {})
+                except (AttributeError, ValueError):
+                    error = {}
+                if error.get("code") == "model_not_supported":
+                    if self.model != FALLBACK_MODEL:
+                        self.model = FALLBACK_MODEL
+                        payload["model"] = FALLBACK_MODEL
+                        continue
+                    raise ProviderError(
+                        f"Hugging Face model '{self.model}' is not supported by an enabled provider. "
+                        "Enable an Inference Provider in Hugging Face settings or choose another supported model.",
+                        kind="model_unavailable",
+                    )
             if resp.status_code >= 500:
                 last_err = ProviderError(f"Hugging Face server error ({resp.status_code}).", kind="server")
                 time.sleep(1.5 * (attempt + 1))

@@ -251,7 +251,9 @@ class Workspace:
     def file_tree(self, max_entries: int = 400):
         tree = []
         for dirpath, dirnames, filenames in os.walk(self.root):
-            dirnames[:] = [d for d in dirnames if d not in (".git", "__pycache__", "venv", ".venv")]
+            dirnames[:] = [d for d in dirnames if d not in (
+                ".git", "__pycache__", "venv", ".venv", "node_modules", ".dart_tool", "build", "target", "dist"
+            )]
             rel_dir = os.path.relpath(dirpath, self.root)
             for fn in sorted(filenames):
                 rel = fn if rel_dir == "." else os.path.join(rel_dir, fn)

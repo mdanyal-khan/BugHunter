@@ -18,27 +18,30 @@ class FakeResponse:
         return self.payload
 
 
-def test_rate_limit_retry_waits_for_provider_reset(monkeypatch):
-    responses = iter([
-        FakeResponse(429, headers={
+def test_rate_limit_returns_immediately_for_provider_failover(monkeypatch):
+    calls = []
+    waits = []
+
+    def rate_limited(*args, **kwargs):
+        calls.append(kwargs)
+        return FakeResponse(429, headers={
             "retry-after": "4",
             "x-ratelimit-reset-tokens": "9s",
-        }),
-        FakeResponse(200, payload={"choices": [{"message": {"content": "{}"}}]}),
-    ])
-    waits = []
-    monkeypatch.setattr(groq_provider.requests, "post", lambda *args, **kwargs: next(responses))
+        })
+
+    monkeypatch.setattr(groq_provider.requests, "post", rate_limited)
     monkeypatch.setattr(groq_provider.time, "sleep", waits.append)
 
-    result = GroqProvider(api_key="test-key").chat(
-        [ChatMessage(role="user", content="hello")], json_mode=True
-    )
+    with pytest.raises(ProviderError) as error:
+        GroqProvider(api_key="test-key").chat([ChatMessage(role="user", content="hello")])
 
-    assert result == "{}"
-    assert waits == [9.0]
+    assert error.value.kind == "rate_limit"
+    assert "9s" in str(error.value)
+    assert len(calls) == 1
+    assert waits == []
 
 
-def test_repeated_rate_limits_use_bounded_backoff(monkeypatch):
+def test_rate_limit_is_not_retried_before_failover(monkeypatch):
     waits = []
     calls = []
 
@@ -53,8 +56,8 @@ def test_repeated_rate_limits_use_bounded_backoff(monkeypatch):
         GroqProvider(api_key="test-key").chat([ChatMessage(role="user", content="hello")])
 
     assert error.value.kind == "rate_limit"
-    assert len(calls) == groq_provider.MAX_ATTEMPTS
-    assert waits == [2.0, 4.0, 8.0]
+    assert len(calls) == 1
+    assert waits == []
 
 
 def test_json_validation_error_retries_without_response_format(monkeypatch):

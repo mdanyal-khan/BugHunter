@@ -102,16 +102,10 @@ class GroqProvider(LLMProvider):
                 continue
 
             if resp.status_code == 429:
-                if attempt == MAX_ATTEMPTS - 1:
-                    raise ProviderError(
-                        f"Groq rate limit persisted after {MAX_ATTEMPTS} attempts.", kind="rate_limit"
-                    )
                 wait_seconds = _rate_limit_wait(resp, attempt)
-                last_err = ProviderError(
-                    f"Groq rate limit reached; retrying in {wait_seconds:g}s.", kind="rate_limit"
+                raise ProviderError(
+                    f"Groq rate limit or quota reached; retry after {wait_seconds:g}s.", kind="rate_limit"
                 )
-                time.sleep(wait_seconds)
-                continue
             if resp.status_code == 401:
                 raise ProviderError("Groq rejected the API key (401 Unauthorized).", kind="auth")
             if resp.status_code >= 500:

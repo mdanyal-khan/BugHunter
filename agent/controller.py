@@ -45,6 +45,21 @@ def _redact_tool_output(text: str) -> tuple:
     return redacted, len(findings)
 
 
+def _provider_label(provider: LLMProvider) -> str:
+    return "Hugging Face" if provider.name == "huggingface" else provider.name.title()
+
+
+def _friendly_patch_validation_detail(detail: str) -> str:
+    normalized = detail.lower()
+    if "no valid patches in input" in normalized:
+        return (
+            "The model response was not a valid unified diff. It needs file headers and at least one change hunk."
+        )
+    if "no diff content was generated" in normalized:
+        return "The model returned an empty patch instead of a code change."
+    return detail
+
+
 class AgentController:
     def __init__(self, workspace: Workspace, provider: LLMProvider, investigation: Investigation,
                  fallback_provider: Optional[LLMProvider] = None):
@@ -59,18 +74,39 @@ class AgentController:
     # ------------------------------------------------------------------ #
     def _ask_llm(self, context: dict):
         messages = prompts.build_messages(context)
-        last_error = None
+        failures = []
         for prov, is_fallback in ((self.provider, False), (self.fallback, True)):
             if prov is None:
                 continue
             try:
+                requested_model = getattr(prov, "model", None)
                 raw = prov.chat(messages, json_mode=True, max_tokens=1800)
                 step = prompts.parse_agent_step(raw)
-                return step, (f"Primary provider failed; switched to {prov.name}." if is_fallback else None)
+                active_model = getattr(prov, "model", None)
+                notices = []
+                if is_fallback:
+                    notices.append(f"{_provider_label(self.provider)} unavailable; continuing with "
+                                   f"{_provider_label(prov)}.")
+                if requested_model and active_model and requested_model != active_model:
+                    notices.append(f"Hugging Face model {requested_model} is unsupported; switched to "
+                                   f"{active_model}.")
+                    if prov is self.provider:
+                        self.inv.model_name = active_model
+                return step, "; ".join(notices) or None
             except (ProviderError, ValueError) as e:
-                last_error = e
-                continue
-        raise last_error or ProviderError("No provider available.")
+                failures.append((prov, e))
+        if len(failures) > 1:
+            details = "; ".join(
+                f"{_provider_label(provider)}: {error}" for provider, error in failures
+            )
+            raise ProviderError(
+                "Both AI providers are unavailable for this request. " + details +
+                ". Check both API keys and quotas, then retry after the rate limits reset.",
+                kind="provider_failover",
+            )
+        if failures:
+            raise failures[0][1]
+        raise ProviderError("No AI provider is configured.", kind="configuration")
 
     def _set(self, status: S):
         self.inv.status = status
@@ -198,7 +234,24 @@ class AgentController:
                         break
                     history.append({"tool": "patch_applier",
                                     "result_text": f"Your patch was REJECTED as invalid:\n{patch.summary}"})
-                    yield {"type": "notice", "message": "Proposed patch failed validation; asking the agent to retry."}
+                    detail = patch.summary
+                    for marker in ("[Validation failed]", "[Apply failed]", "[Error applying patch]"):
+                        if marker in detail:
+                            detail = detail.split(marker, 1)[1].strip()
+                            break
+                    detail, secret_findings = _redact_tool_output(detail)
+                    detail = _friendly_patch_validation_detail(detail)
+                    retrying = step_no < max_steps
+                    yield {
+                        "type": "notice",
+                        "message": (
+                            "Patch needs adjustment; the agent is retrying automatically."
+                            if retrying else "The agent could not produce an applicable patch this attempt."
+                        ),
+                        "details": detail[:1500],
+                        "secret_findings": secret_findings,
+                        "retrying": retrying,
+                    }
 
                 elif action == "finish_no_fix":
                     reason = inp.get("reason", "The agent could not propose a confident fix.")

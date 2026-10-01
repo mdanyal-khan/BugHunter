@@ -174,10 +174,22 @@ def sidebar():
     else:
         sb.info("Offline demo mode runs the full loop on the bundled demo repos — no key or internet needed.", icon="🛰️")
 
+    fallback = sb.toggle("Automatically switch providers on rate limits or errors", value=True,
+                         key="automatic_provider_failover")
+    fallback_api_key = ""
+    if fallback and provider in ("groq", "huggingface"):
+        other = "huggingface" if provider == "groq" else "groq"
+        other_env_key = Config.HF_API_KEY if other == "huggingface" else Config.GROQ_API_KEY
+        fallback_api_key = sb.text_input(
+            f"Fallback API key ({PROVIDER_LABELS[other]})", type="password", key=f"key_{other}",
+            placeholder="Using environment variable" if other_env_key else "Add the other provider's key",
+        ) or other_env_key
+        if not fallback_api_key:
+            sb.caption("Add the other provider's API key to enable automatic failover.")
+
     sb.markdown("### 🎛️ Investigation limits")
     max_iter = sb.slider("Maximum iterations", 1, 10, Config.MAX_ITERATIONS_DEFAULT)
     timeout = sb.slider("Test timeout (seconds)", 10, 300, Config.TIMEOUT_SECONDS_DEFAULT, step=10)
-    fallback = sb.toggle("Fall back to the other provider on failure", value=True)
 
     sb.markdown("---")
     if sb.button("🗑️ Reset session", use_container_width=True):
@@ -189,7 +201,7 @@ def sidebar():
     sb.caption("Repository code runs only inside an isolated per-session workspace. "
                "Nothing is applied as final without your approval.")
     return dict(provider=provider, model=model, api_key=api_key, max_iter=max_iter,
-                timeout=timeout, fallback=fallback)
+                timeout=timeout, fallback=fallback, fallback_api_key=fallback_api_key)
 
 
 def build_providers(cfg):
@@ -197,7 +209,9 @@ def build_providers(cfg):
     fb = None
     if cfg["fallback"] and cfg["provider"] in ("groq", "huggingface"):
         other = "huggingface" if cfg["provider"] == "groq" else "groq"
-        other_key = st.session_state.get(f"key_{other}") or (Config.HF_API_KEY if other == "huggingface" else Config.GROQ_API_KEY)
+        other_key = cfg.get("fallback_api_key") or (
+            Config.HF_API_KEY if other == "huggingface" else Config.GROQ_API_KEY
+        )
         if other_key:
             fb = get_provider(other, api_key=other_key)
     return primary, fb
@@ -208,7 +222,7 @@ def repository_section():
     C.step_title(1, "Load a repository")
     tab_zip, tab_github, tab_demo = st.tabs(["📦 Upload ZIP", "🐙 GitHub URL", "🎯 Demo repositories"])
     with tab_zip:
-        up = st.file_uploader("Python repository (.zip)", type=["zip"], label_visibility="collapsed")
+        up = st.file_uploader("Project archive (.zip)", type=["zip"], label_visibility="collapsed")
         if up is not None and st.session_state.repo_label != up.name:
             load_zip(up)
             st.rerun()
@@ -237,10 +251,13 @@ def repository_section():
 
     scan = st.session_state.scan
     if scan:
-        C.metrics([("Repository", f'<span style="font-size:1rem">{st.session_state.repo_label}</span>'),
-                   ("Files", scan["file_count"]), ("Python files", scan["python_file_count"]),
-                   ("Directories", len(scan["directories"])),
-                   ("Test files", len(scan["test_files"]))])
+        C.metrics([
+            ("Repository", st.session_state.repo_label),
+            ("Files", scan["file_count"]),
+            ("Languages", ", ".join(scan["languages"]) or "Unknown"),
+            ("Directories", len(scan["directories"])),
+            ("Test files", len(scan["test_files"])),
+        ])
         with st.expander("Repository structure"):
             entries = [f"{directory}/" for directory in scan["directories"]] + scan["files"]
             st.code("\n".join(entries), language="text")
@@ -297,9 +314,8 @@ def results_section():
 
     tests = [i.test_result for i in inv.iterations if i.test_result]
     last = tests[-1] if tests else None
-    pill = "ok" if (last and last.passed) else ("warn" if last and last.status == "NO_TESTS" else "bad")
     C.metrics([
-        ("Status", C.status_pill(inv.status.value.replace("_", " "), pill if last else "warn")),
+        ("Status", inv.status.value.replace("_", " ")),
         ("Iterations", f"{len(inv.iterations)} / {inv.max_iterations}"),
         ("Tests passed", last.passed_count if last else "—"),
         ("Tests failed", last.failed_count if last else "—"),

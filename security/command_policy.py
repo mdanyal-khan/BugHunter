@@ -9,6 +9,7 @@ Section 28.2 (Prompt Injection Protection) of the SRS.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -16,7 +17,7 @@ from dataclasses import dataclass
 
 ALLOWED_EXECUTABLES = {
     "python", "python3", sys.executable.split(os.sep)[-1],
-    "pytest", "git",
+    "pytest", "git", "dart", "flutter", "node", "npm", "go", "cargo",
 }
 
 
@@ -37,11 +38,26 @@ class CommandResult:
 def _restricted_env() -> dict:
     """Environment for workspace subprocesses: no host secrets (SEC-010)."""
     env = {}
-    for key in ("PATH", "HOME", "LANG", "LC_ALL", "SYSTEMROOT", "TEMP", "TMP"):
+    for key in ("PATH", "HOME", "LANG", "LC_ALL", "SYSTEMROOT", "TEMP", "TMP",
+                "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PATHEXT"):
         if key in os.environ:
             env[key] = os.environ[key]
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
+
+
+def _windows_batch_command(cmd: list, env: dict) -> str:
+    """Build a cmd.exe invocation for a fixed, non-shell-parameterized SDK action."""
+    allowed_subcommands = {"dart": "test", "flutter": "test", "npm": "test"}
+    subcommand = allowed_subcommands.get(cmd[0])
+    if subcommand is None or cmd[1:] != [subcommand]:
+        raise CommandRejected("Only the fixed test subcommand is allowed for Windows batch launchers.")
+    launcher = shutil.which(cmd[0])
+    if not launcher:
+        raise FileNotFoundError(cmd[0])
+    comspec = env.get("COMSPEC") or os.path.join(env.get("SYSTEMROOT", r"C:\Windows"), "System32", "cmd.exe")
+    command = f'"{launcher}" {subcommand}'
+    return f'{subprocess.list2cmdline([comspec])} /d /c "{command}"'
 
 
 def _resource_limit_preexec(timeout: int):
@@ -77,10 +93,14 @@ def run_allowlisted(cmd: list, cwd: str, timeout: int) -> CommandResult:
             f"Command '{exe}' is not on the allowlist ({sorted(ALLOWED_EXECUTABLES)}) and was blocked."
         )
     start = time.time()
+    env = _restricted_env()
+    run_cmd = cmd
+    if os.name == "nt" and os.path.basename(cmd[0]) in {"dart", "flutter", "npm"}:
+        run_cmd = _windows_batch_command(cmd, env)
     try:
         proc = subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True,
-            timeout=timeout, env=_restricted_env(),
+            run_cmd, cwd=cwd, capture_output=True, text=True,
+            timeout=timeout, env=env,
             preexec_fn=_resource_limit_preexec(timeout),
         )
         duration_ms = int((time.time() - start) * 1000)

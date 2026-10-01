@@ -96,6 +96,7 @@ def validate_and_apply(workspace: Workspace, diff_text: str, summary: str = "") 
 
     if not diff_text.strip():
         patch.status = PatchStatus.INVALID
+        patch.summary = (patch.summary + "\n\n[Validation failed]\nNo diff content was generated.").strip()
         return patch
 
     checkpoint = workspace.checkpoint("pre-patch checkpoint")
@@ -112,7 +113,8 @@ def validate_and_apply(workspace: Workspace, diff_text: str, summary: str = "") 
         )
         if check.returncode != 0:
             patch.status = PatchStatus.INVALID
-            patch.summary = (patch.summary + f"\n\n[Validation failed]\n{check.stderr}").strip()
+            detail = check.stderr.strip() or "git apply --check rejected the diff without details."
+            patch.summary = (patch.summary + f"\n\n[Validation failed]\n{detail}").strip()
             return patch
 
         apply_result = subprocess.run(

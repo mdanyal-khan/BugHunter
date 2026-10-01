@@ -38,7 +38,7 @@ class Config:
     GROQ_API_BASE: str = os.environ.get("GROQ_API_BASE", "https://api.groq.com/openai/v1")
 
     HF_API_KEY: str = os.environ.get("HF_API_KEY", "")
-    HF_MODEL: str = os.environ.get("HF_MODEL", "meta-llama/Meta-Llama-3-8B-Instruct")
+    HF_MODEL: str = os.environ.get("HF_MODEL", "openai/gpt-oss-120b:fastest")
     HF_API_BASE: str = os.environ.get("HF_API_BASE", "https://api-inference.huggingface.co")
 
     DEFAULT_PROVIDER: str = os.environ.get("DEFAULT_PROVIDER", "groq")

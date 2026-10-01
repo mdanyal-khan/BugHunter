@@ -48,7 +48,7 @@ def hero():
     st.markdown(
         """
         <div class="hero">
-          <h1>🐞 BugHunter Agent</h1>
+          <h1>BugHunter Agent</h1>
           <p>Agentic AI debugging: it inspects your repository, reasons about the bug, patches it in an
           isolated workspace, runs the tests, and keeps iterating until they pass.</p>
           <div class="chips">
@@ -69,7 +69,7 @@ def step_title(num: int, text: str):
 
 
 def metrics(items: list):
-    html = "".join(f'<div class="metric"><div class="k">{escape(k)}</div><div class="v">{v}</div></div>'
+    html = "".join(f'<div class="metric"><div class="k">{escape(k)}</div><div class="v">{escape(str(v))}</div></div>'
                    for k, v in items)
     st.markdown(f'<div class="metrics">{html}</div>', unsafe_allow_html=True)
 
@@ -138,7 +138,15 @@ def render_event(ev: dict):
             st.warning(f"Redacted {ev['secret_findings']} secret-like value(s) from test output.")
         render_test_result(ev["result"], ev["iteration"])
     elif t == "notice":
-        st.warning(ev["message"], icon="🔁")
+        if ev.get("retrying"):
+            st.info(ev["message"], icon="🔁")
+        else:
+            st.warning(ev["message"], icon="🔁")
+        if ev.get("secret_findings"):
+            st.caption(f"Redacted {ev['secret_findings']} secret-like value(s) from validation details.")
+        if ev.get("details"):
+            with st.expander("Patch validation details"):
+                st.code(ev["details"], language="text")
     elif t == "error":
         st.error(ev["message"])
     elif t == "done":
