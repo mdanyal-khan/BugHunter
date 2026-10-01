@@ -17,6 +17,7 @@ from security.workspace import Workspace
 
 _DIFF_FENCE_RE = re.compile(r"```(?:diff|patch)?\s*\n(.*?)```", re.DOTALL)
 _FILE_HEADER_RE = re.compile(r"^\+\+\+ (?:b/)?(.+)$", re.MULTILINE)
+_BARE_HUNK_RE = re.compile(r"^@@\s*$")
 
 
 def extract_diff(raw_text: str) -> str:
@@ -33,8 +34,64 @@ def files_touched(diff_text: str) -> list:
     return sorted(set(_FILE_HEADER_RE.findall(diff_text)))
 
 
+def _repair_bare_hunk_headers(workspace: Workspace, diff_text: str) -> str:
+    """Fill bare @@ headers only when their old-side context is a unique match."""
+    lines = diff_text.splitlines(keepends=True)
+    repaired = []
+    index = 0
+    current_path = None
+    previous_delta = 0
+
+    while index < len(lines):
+        line = lines[index]
+        if line.startswith("+++ "):
+            current_path = line[4:].strip()
+            if current_path.startswith("b/"):
+                current_path = current_path[2:]
+            previous_delta = 0
+            repaired.append(line)
+            index += 1
+            continue
+
+        if not _BARE_HUNK_RE.match(line.rstrip("\r\n")) or not current_path:
+            repaired.append(line)
+            index += 1
+            continue
+
+        end = index + 1
+        while end < len(lines) and not lines[end].startswith(("@@", "--- ", "+++ ")):
+            end += 1
+        hunk = lines[index + 1:end]
+        old_lines = [item[1:].rstrip("\r\n") for item in hunk
+                     if item.startswith((" ", "-"))]
+        new_count = sum(item.startswith((" ", "+")) for item in hunk)
+
+        try:
+            target = workspace.resolve(current_path)
+            with open(target, "r", encoding="utf-8", newline="") as source:
+                source_lines = source.read().splitlines()
+        except (OSError, UnicodeError):
+            source_lines = []
+
+        matches = [start for start in range(len(source_lines) - len(old_lines) + 1)
+                   if old_lines and source_lines[start:start + len(old_lines)] == old_lines]
+        if len(matches) == 1:
+            old_start = matches[0] + 1
+            new_start = max(1, old_start + previous_delta)
+            old_count = len(old_lines)
+            repaired.append(f"@@ -{old_start},{old_count} +{new_start},{new_count} @@\n")
+            previous_delta += new_count - old_count
+        else:
+            repaired.append(line)
+        repaired.extend(hunk)
+        index = end
+
+    return "".join(repaired)
+
+
 def validate_and_apply(workspace: Workspace, diff_text: str, summary: str = "") -> Patch:
     """Validates a unified diff with `git apply --check`, then applies it (SEC-011)."""
+    diff_text = _repair_bare_hunk_headers(workspace, diff_text)
     patch = Patch(diff=diff_text, summary=summary, files_changed=files_touched(diff_text))
 
     if not diff_text.strip():
@@ -50,7 +107,7 @@ def validate_and_apply(workspace: Workspace, diff_text: str, summary: str = "") 
 
     try:
         check = subprocess.run(
-            ["git", "apply", "--check", "--whitespace=fix", patch_file],
+            ["git", "apply", "--check", "--recount", "--whitespace=fix", patch_file],
             cwd=workspace.root, capture_output=True, text=True, timeout=15,
         )
         if check.returncode != 0:
@@ -59,7 +116,7 @@ def validate_and_apply(workspace: Workspace, diff_text: str, summary: str = "") 
             return patch
 
         apply_result = subprocess.run(
-            ["git", "apply", "--whitespace=fix", patch_file],
+            ["git", "apply", "--recount", "--whitespace=fix", patch_file],
             cwd=workspace.root, capture_output=True, text=True, timeout=15,
         )
         if apply_result.returncode != 0:
